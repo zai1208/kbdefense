@@ -1,177 +1,148 @@
-# ****************************************************************************************
-#
-#   raylib - classic game: floppy
-#
-#   Sample game developed by Ian Eito, Albert Martos and Ramon Santamaria
-#
-#   This game has been created using raylib v1.3 (www.raylib.com)
-#   raylib is licensed under an unmodified zlib/libpng license (View raylib.h for details)
-#
-#   Copyright (c) 2015 Ramon Santamaria (@raysan5)
-#   Converted to Nim by Antonis Geralis (@planetis-m) in 2023
-#
-# ****************************************************************************************
-
-import raylib, std/[lenientops, random, strformat]
-
-# ----------------------------------------------------------------------------------------
-# Some Defines
-# ----------------------------------------------------------------------------------------
+import raylib
+import tables
+import sequtils
 
 const
-  screenWidth = 800
-  screenHeight = 450
-
-  MaxTubes = 100
-  FloppyRadius = 24
-  TubeWidth = 80
-
-# ----------------------------------------------------------------------------------------
-# Types and Structures Definition
-# ----------------------------------------------------------------------------------------
+  SCREEN_W = 800
+  SCREEN_H = 600
+  FONT_SIZE = 20
+  CELL_W = 10
+  CELL_H = 20
+  GRID_COLS = 80
+  GRID_ROWS = 40
 
 type
-  Floppy = object
-    position: Vector2
-    radius: int32
-    color: Color
+  Color2 = enum
+    cWhite, cGrey, cGreen, cYellow, cRed
 
-  Tube = object
-    rec: Rectangle
-    color: Color
-    active: bool
-
-# ----------------------------------------------------------------------------------------
-#  Global Variables Declaration
-# ----------------------------------------------------------------------------------------
+  Cell = object
+    ch: char
+    color: Color2
+    lifetime: float32
+    alpha: float32
 
 var
-  gameOver = false
-  pause = false
-  score: int32 = 0
-  hiScore: int32 = 0
-  floppy: Floppy
-  tubes: array[MaxTubes*2, Tube]
-  tubesPos: array[MaxTubes, Vector2]
-  tubesSpeedX: int32 = 0
-  superfx = false
+  cursorX: int = 0
+  cursorY: int = 0
+  dirX: int = 1
+  dirY: int = 0
+  camX, camY: float32 = 0
+  tickTimer: float32 = 0
+  typingBuffer: string = ""
+  grid: Table[(int, int), Cell]
+  blinkTimer: float32 = 0
+  blinkOn: bool = true
 
-# ----------------------------------------------------------------------------------------
-#  Module Functions Definitions (local)
-# ----------------------------------------------------------------------------------------
+proc toRayColor(c: Color2): Color =
+  case c
+  of cWhite:  White
+  of cGrey:   Gray
+  of cGreen:  Green
+  of cYellow: Yellow
+  of cRed:    Red
 
-proc initGame =
-  # Initialize game variables
-  floppy.radius = FloppyRadius
-  floppy.position = Vector2(x: 80, y: screenHeight/2'f32 - floppy.radius)
-  tubesSpeedX = 2
-  for i in 0..<MaxTubes:
-    tubesPos[i] = Vector2(x: float32(400 + 280*i), y: -rand(0..120).float32)
-  for i in countup(0, MaxTubes*2 - 1, 2):
-    tubes[i] = Tube(
-      rec: Rectangle(x: tubesPos[i div 2].x, y: tubesPos[i div 2].y, width: TubeWidth, height: 255)
-    )
-    tubes[i + 1] = Tube(
-      rec: Rectangle(x: tubesPos[i div 2].x, y: 600 + tubesPos[i div 2].y - 255, width: TubeWidth, height: 255)
-    )
-    tubes[i div 2].active = true
-  score = 0
-  gameOver = false
-  superfx = false
-  pause = false
+proc placeChar(ch: char, col: Color2, lifetime: float32 = 0.0, alpha: float32) =
+  grid[(cursorX, cursorY)] = Cell(ch: ch, color: col, lifetime: lifetime, alpha: alpha)
+  cursorX += dirX
+  cursorY += dirY
 
-proc updateGame =
-  # Update game (one frame)
-  if not gameOver:
-    if isKeyPressed(Escape):
-      pause = not pause
-    if not pause:
-      for i in 0..<MaxTubes:
-        tubesPos[i].x -= tubesSpeedX.float32
-      for i in countup(0, MaxTubes*2 - 1, 2):
-        tubes[i].rec.x = tubesPos[i div 2].x
-        tubes[i + 1].rec.x = tubesPos[i div 2].x
-      if isKeyDown(Space) and not gameOver:
-        floppy.position.y -= 3
+proc handleInput() =
+  # direction keys
+  if isKeyPressed(KeyboardKey.Right): dirX = 1;  dirY = 0
+  if isKeyPressed(KeyboardKey.Left):  dirX = -1; dirY = 0
+  if isKeyPressed(KeyboardKey.Down):  dirX = 0;  dirY = 1
+  if isKeyPressed(KeyboardKey.Up):    dirX = 0;  dirY = -1
+  if isKeyPressed(KeyboardKey.Backspace):
+    cursorX -= dirX
+    cursorY -= dirY
+    grid[(cursorX, cursorY)] = Cell(ch: '\0', color: cWhite)
+    if typingBuffer.len > 0:
+      typingBuffer.setLen(typingBuffer.len - 1)
+  # typing
+  var ch = getCharPressed()
+  while ch != 0:
+    if ch >= 32 and ch <= 126:
+      let c = char(ch)
+      typingBuffer.add(c)
+      if c == ' ':
+        # just advance cursor
+        cursorX += dirX
+        cursorY += dirY
       else:
-        floppy.position.y += 1
-      # Check Collisions
-      for i in 0..<MaxTubes*2:
-        if checkCollisionCircleRec(floppy.position, floppy.radius.float32, tubes[i].rec):
-          gameOver = true
-          pause = false
-        elif tubesPos[i div 2].x < floppy.position.x and tubes[i div 2].active and
-            not gameOver:
-          inc(score, 100)
-          tubes[i div 2].active = false
-          superfx = true
-          if score > hiScore:
-            hiScore = score
-  else:
-    if isKeyPressed(Enter):
-      initGame()
-      gameOver = false
+        placeChar(c, cWhite, 6.0, 1.0)
+    ch = getCharPressed()
 
-proc drawGame =
-  # Draw game (one frame)
-  beginDrawing()
-  clearBackground(White)
-  if not gameOver:
-    drawCircle(floppy.position, floppy.radius.float32, RayWhite)
-    # Draw tubes
-    for i in 0..<MaxTubes:
-      drawRectangle(tubes[i*2].rec, Gray)
-      drawRectangle(tubes[i*2 + 1].rec, Gray)
-    # Draw flashing fx (one frame only)
-    if superfx:
-      drawRectangle(0, 0, screenWidth, screenHeight, White)
-      superfx = false
-    drawText(&"{score:04d}", 20, 20, 40, Gray)
-    drawText(&"HI-SCORE: {hiScore:04d}", 20, 70, 20, LightGray)
-    if pause:
-      drawText("GAME PAUSED", screenWidth div 2 - measureText("GAME PAUSED", 40) div 2,
-          screenHeight div 2 - 40, 40, Gray)
-  else:
-    drawText("PRESS [ENTER] TO PLAY AGAIN", getScreenWidth() div 2 -
-        measureText("PRESS [ENTER] TO PLAY AGAIN", 20) div 2,
-        getScreenHeight() div 2 - 50, 20, Gray)
-  endDrawing()
+proc gameTick() =
+  discard # enemies, turrets etc later
 
-proc unloadGame =
-  # Unload game variables
-  # TODO: Unload all dynamic loaded data (textures, sounds, models...)
-  discard
+proc main() =
+  initWindow(SCREEN_W, SCREEN_H, "game")
+  setTargetFPS(60)
+  var codepoints: seq[int32] = @[0x25B6.int32, 0x25C0.int32, 0x25BC.int32, 0x25B2.int32]
+  for i in 32..126:
+    codepoints.add(i.int32)
 
-proc updateDrawFrame {.cdecl.} =
-  # Update and Draw (one frame)
-  updateGame()
-  drawGame()
+  let font = loadFont("/usr/share/fonts/TTF/IosevkaTerm-Extended.ttf", FONT_SIZE, codepoints)
+  setTextureFilter(font.texture, TextureFilter.Bilinear)
+  let fontBold = loadFont("/usr/share/fonts/TTF/IosevkaTerm-ExtendedBold.ttf", FONT_SIZE, codepoints)
+  setTextureFilter(fontBold.texture, TextureFilter.Bilinear)
 
-# ----------------------------------------------------------------------------------------
-#  Program main entry point
-# ----------------------------------------------------------------------------------------
+  while not windowShouldClose():
+    let dt = getFrameTime()
 
-proc main =
-  # Initialization
-  # --------------------------------------------------------------------------------------
-  initWindow(screenWidth, screenHeight, "classic game: floppy")
-  try:
-    initGame()
-    when defined(emscripten):
-      emscriptenSetMainLoop(updateDrawFrame, 60, 1)
+    # tick
+    tickTimer += dt
+    if tickTimer >= 1.0:
+      gameTick()
+      tickTimer = 0.0
+
+    blinkTimer += dt
+    if blinkTimer >= 0.5:
+      blinkOn = not blinkOn
+      blinkTimer = 0.0
+    # input
+    handleInput()
+
+    # camera lerp toward cursor
+    let targetX = float32(cursorX * CELL_W) - SCREEN_W / 2
+    let targetY = float32(cursorY * CELL_H) - SCREEN_H / 2
+    camX += (targetX - camX) * 0.1
+    camY += (targetY - camY) * 0.1
+
+    # draw
+    beginDrawing()
+    clearBackground(Color(r: 38, g: 38, b: 51, a: 255))
+
+    for (pos, cell) in grid.mpairs:
+      if cell.lifetime > 0:
+        cell.lifetime -= dt
+        cell.alpha -= dt / cell.lifetime
+      if cell.lifetime <= 0:
+        cell.ch = '\0'
+      if cell.ch != '\0':
+        let sx = float32(pos[0] * CELL_W) - camX
+        let sy = float32(pos[1] * CELL_H) - camY
+        let colour = toRayColor(cell.color)
+        drawText(font, $cell.ch, Vector2(x: sx, y: sy),
+                float32(FONT_SIZE), 0.0'f32, colorAlpha(toRayColor(cell.color), cell.alpha))
+
+    # draw cursor
+    let cx = float32(cursorX * CELL_W) - camX
+    let cy = float32(cursorY * CELL_H) - camY
+
+    let arrow =
+      if dirX == 1:    ">"
+      elif dirX == -1: "<"
+      elif dirY == 1:  "v"
+      else:            "^"
+    if blinkOn:
+      drawRectangle(int32(cx), int32(cy), CELL_W, CELL_H, White)
+      drawText(fontBold, arrow, Vector2(x: cx, y: cy), float32(FONT_SIZE), 0.0'f32, Color(r: 38, g: 38, b: 51, a: 255))
     else:
-      setTargetFPS(60)
-      # ----------------------------------------------------------------------------------
-      # Main game loop
-      while not windowShouldClose(): # Detect window close button or ESC key
-        # Update and Draw
-        # --------------------------------------------------------------------------------
-        updateDrawFrame()
-        # --------------------------------------------------------------------------------
-    # De-Initialization
-    # ------------------------------------------------------------------------------------
-    unloadGame() # Unload loaded data (textures, sounds, models...)
-  finally:
-    closeWindow() # Close window and OpenGL context
+      drawRectangle(int32(cx), int32(cy), CELL_W, CELL_H, Color(r: 255, g: 255, b: 255, a: 130))
+      drawText(fontBold, arrow, Vector2(x: cx, y: cy), float32(FONT_SIZE), 0.0'f32, Color(r: 38, g: 38, b: 51, a: 255))
+    endDrawing()
+
+  closeWindow()
 
 main()
