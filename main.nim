@@ -1,6 +1,7 @@
 import raylib
 import tables
 import sequtils
+import std/strutils
 
 const
   SCREEN_W = 800
@@ -10,6 +11,7 @@ const
   CELL_H = 20
   GRID_COLS = 80
   GRID_ROWS = 40
+  COMMANDS = ["TURRET", "WALL", "SWEEPER", "COREBASE"]
 
 type
   Color2 = enum
@@ -20,6 +22,7 @@ type
     color: Color2
     lifetime: float32
     alpha: float32
+    permanent: bool = false
 
 var
   cursorX: int = 0
@@ -41,18 +44,56 @@ proc toRayColor(c: Color2): Color =
   of cYellow: Yellow
   of cRed:    Red
 
-proc placeChar(ch: char, col: Color2, lifetime: float32 = 0.0, alpha: float32) =
-  grid[(cursorX, cursorY)] = Cell(ch: ch, color: col, lifetime: lifetime, alpha: alpha)
-  cursorX += dirX
-  cursorY += dirY
+proc placeChar(ch: char, col: Color2, lifetime: float32 = 0.0, alpha: float32, permanent: bool = false) =
+  if not grid.getOrDefault((cursorX + dirX, cursorY + dirY)).permanent:
+    grid[(cursorX, cursorY)] = Cell(ch: ch, color: col, lifetime: lifetime, alpha: alpha, permanent: permanent)
+    cursorX += dirX
+    cursorY += dirY
+proc blinkRed() =
+  var bx = cursorX - dirX
+  var by = cursorY - dirY
+  for c in countdown(typingBuffer.len - 1, 0):
+    if typingBuffer[c] != ' ':
+      grid[(bx, by)].color = cRed
+      grid[(bx, by)].lifetime = 2.0
+    bx -= dirX
+    by -= dirY
 
+proc executeCommand(cmd: string) =
+  case cmd
+  of "TURRET":
+    cursorX -= dirX * 6
+    for i in 0..2:
+      for c in "TURRET":
+        placeChar(c, cGreen, -1.0, 1.0, true)
+      cursorY += 1
+      cursorX -= dirX * 6
+    cursorX += dirX * 6
+    cursorY -= 3
+  of "WALL":
+    placeChar('#', cGrey, 0.0, 1.0)
+  of "SWEEPER":
+    placeChar('S', cYellow, 0.0, 1.0)
+  of "COREBASE":
+    placeChar('C', cRed, 0.0, 1.0)
 proc handleInput() =
   # direction keys
   if isKeyPressed(KeyboardKey.Right): dirX = 1;  dirY = 0
   if isKeyPressed(KeyboardKey.Left):  dirX = -1; dirY = 0
   if isKeyPressed(KeyboardKey.Down):  dirX = 0;  dirY = 1
   if isKeyPressed(KeyboardKey.Up):    dirX = 0;  dirY = -1
-  if isKeyPressed(KeyboardKey.Backspace):
+  if isKeyPressed(KeyboardKey.Enter):
+    var matched = ""
+    for cmd in COMMANDS:
+      if typingBuffer.endsWith(cmd):
+        matched = cmd
+        break
+    if matched != "":
+      executeCommand(matched)
+    else:
+      blinkRed()
+    typingBuffer = ""
+  if isKeyPressed(KeyboardKey.Backspace) and not grid.getOrDefault((cursorX - dirX, cursorY - dirY)).permanent:
     cursorX -= dirX
     cursorY -= dirY
     grid[(cursorX, cursorY)] = Cell(ch: '\0', color: cWhite)
@@ -117,7 +158,7 @@ proc main() =
       if cell.lifetime > 0:
         cell.lifetime -= dt
         cell.alpha -= dt / cell.lifetime
-      if cell.lifetime <= 0:
+      if cell.lifetime <= 0 and cell.lifetime != -1.0:
         cell.ch = '\0'
       if cell.ch != '\0':
         let sx = float32(pos[0] * CELL_W) - camX
