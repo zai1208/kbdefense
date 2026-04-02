@@ -229,7 +229,7 @@ proc barrelUpdate() =
           turret.hp += 1
 
 proc main() =
-  initWindow(SCREEN_W, SCREEN_H, "game")
+  initWindow(SCREEN_W, SCREEN_H, "SECTOR\\0")
   setTargetFPS(60)
   var codepoints: seq[int32] = @[0x2588.int32, 0x2591.int32]
   for i in 32..126:
