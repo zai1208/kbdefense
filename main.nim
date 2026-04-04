@@ -2,8 +2,16 @@ import raylib
 import tables
 import sequtils
 import std/strutils
+import std/math
+import std/random
 
 const
+  cloudMask = [
+    (1, 0), (2, 0),           # row 0:  @$
+    (0, 1), (1, 1), (2, 1), (3, 1),  # row 1: $%@$
+    (1, 2), (2, 2), (3, 2),  # row 2:  @$%
+    (2, 3)                    # row 3:   @
+  ]
   SCREEN_W = 800
   SCREEN_H = 600
   FONT_SIZE = 20
@@ -30,6 +38,20 @@ type
     facingY: int
     hp: int
 
+  Core = object
+    x, y: int
+    hp: int
+
+  Enemy = object
+    x, y: int
+    drawX, drawY: float32  # visual position, lerps toward x,y
+    size: int
+    hp: int
+    chars: array[10, char]
+    moveTimer: float32
+    moveSpeed: float32
+    resourceDrop: int
+
 var
   cursorX: int = 0
   cursorY: int = 0
@@ -49,6 +71,8 @@ var
 
   grid: Table[(int, int), Cell]
   turrets: seq[Turret] = @[]
+  cores: seq[Core] = @[]
+  enemies: seq[Enemy] = @[]
 
   blinkTimer: float32 = 0
   blinkOn: bool = true
@@ -96,6 +120,45 @@ proc barrelCells(facingX, facingY: int): seq[(int, int)] =
     return @[(0,1),(1,1),(2,1),(3,1),(0,2),(1,2),(2,2),(3,2)]
   else:
     return @[]
+
+proc nearestCorebase(ex, ey: int): (int, int) =
+  var bestX = 0
+  var bestY = 0
+  var bestDist = int.high
+  for core in cores:
+    let dist = abs(core.x - ex) + abs(core.y - ey)
+    if dist < bestDist:
+      bestDist = dist
+      bestX = core.x
+      bestY = core.y
+  return (bestX, bestY)
+
+
+
+proc spawnEnemy(x, y, size: int) =
+  enemies.add(Enemy(x: x, y: y, drawX: float32(x), drawY: float32(y), size: size, hp: size * size, moveTimer: 0.0, moveSpeed: 0.5, resourceDrop: size * 2))
+
+proc updateEnemies(dt: float32) =
+  for enemy in enemies.mitems:
+    enemy.moveTimer += dt
+    if enemy.moveTimer >= enemy.moveSpeed:
+      enemy.moveTimer = 0.0
+      let (cx, cy) = nearestCorebase(enemy.x, enemy.y)
+      let dx = cx - enemy.x
+      let dy = cy - enemy.y
+      if abs(dx) > abs(dy):
+        enemy.x += sgn(dx)
+      else:
+        enemy.y += sgn(dy)
+
+proc drawEnemies(font: Font) =
+  for enemy in enemies.mitems:
+    for (dc, dr) in cloudMask:
+      let sx = (float32(enemy.x) + float32(dc)) * CELL_W - camX
+      let sy = (float32(enemy.y) + float32(dr)) * CELL_H - camY
+      if enemy.moveTimer >= enemy.moveSpeed * 0.9:
+        enemy.chars[(dr * 6 + dc) mod 10] = char(rand(33..126))
+      drawText(font, $enemy.chars[(dr * 6 + dc) mod 10], Vector2(x: sx, y: sy), float32(FONT_SIZE), 0.0'f32, Red)
 
 proc placeChar(ch: char, col: Color, lifetime: float32 = 0.0, alpha: uint8, permanent: bool = false, targetColor: Color = White, bufferIndex: int = -1) =
   if not grid.getOrDefault((cursorX + dirX, cursorY + dirY)).permanent:
@@ -150,7 +213,6 @@ proc executeCommand(cmd: string) =
     #TODO: Implement sweeper
     discard
   of "COREBASE":
-    #TODO: Add to list corebases
     if canPlaceCore() and dirX == 1 and dirY == 0 and resources >= coreCost:
       resources -= coreCost
       cursorX -= dirX * 8
@@ -162,6 +224,10 @@ proc executeCommand(cmd: string) =
         cursorX -= dirX * 8
       cursorX += dirX * 8
       cursorY -= 4
+      cores.add(Core(x: cursorX - dirX * 8, y: cursorY))
+      spawnEnemy(15, 15, wave * 3)
+      spawnEnemy(20, 15, wave * 3)
+      spawnEnemy(15, 20, wave * 3)
     else:
       if resources < coreCost:
         warn("Not enough resources!")
@@ -231,6 +297,7 @@ proc barrelUpdate() =
 proc main() =
   initWindow(SCREEN_W, SCREEN_H, "SECTOR\\0")
   setTargetFPS(60)
+  randomize()
   var codepoints: seq[int32] = @[0x2588.int32, 0x2591.int32]
   for i in 32..126:
     codepoints.add(i.int32)
@@ -253,6 +320,7 @@ proc main() =
       blinkOn = not blinkOn
       blinkTimer = 0.0
 
+    updateEnemies(dt)
     # input
     handleInput()
 
@@ -290,7 +358,7 @@ proc main() =
                 float32(FONT_SIZE), 0.0'f32, cell.color)
     if typingBuffer.allIt(it == ' '):
       typingBuffer = ""
-
+    drawEnemies(font)
     # draw cursor
     let cx = float32(cursorX * CELL_W) - camX
     let cy = float32(cursorY * CELL_H) - camY
