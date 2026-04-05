@@ -12,6 +12,11 @@ const
     (1, 2), (2, 2), (3, 2),  # row 2:  @$%
     (2, 3)                    # row 3:   @
   ]
+  fontData = staticRead("/usr/share/fonts/TTF/IosevkaTerm-Extended.ttf")
+  fontBoldData = staticRead("/usr/share/fonts/TTF/IosevkaTerm-ExtendedBold.ttf")
+  clickData = staticRead("click.wav")
+  shootData = staticRead("shoot.wav")
+  spawnData = staticRead("spawn.wav")
   SCREEN_W = 800
   SCREEN_H = 600
   FONT_SIZE = 20
@@ -44,13 +49,28 @@ type
 
   Enemy = object
     x, y: int
-    drawX, drawY: float32  # visual position, lerps toward x,y
     size: int
     hp: int
     chars: array[10, char]
     moveTimer: float32
     moveSpeed: float32
     resourceDrop: int
+
+  Projectile = object
+    x, y: float32
+    targetIdx: int 
+    dirX, dirY: int
+    moveTimer: float32
+    moveSpeed: float32
+    damage: int
+    ch: char
+    done: bool = false
+
+  Particle = object
+    x, y: float32
+    velX, velY: float32
+    lifetime: float32
+    ch: char
 
 var
   cursorX: int = 0
@@ -73,6 +93,8 @@ var
   turrets: seq[Turret] = @[]
   cores: seq[Core] = @[]
   enemies: seq[Enemy] = @[]
+  projectiles: seq[Projectile] = @[]
+  particles: seq[Particle] = @[]
 
   blinkTimer: float32 = 0
   blinkOn: bool = true
@@ -83,6 +105,12 @@ var
   corehp: int = 18
   maxCorehp: int = 18
   wave: int = 1
+
+proc placeChar(ch: char, col: Color, lifetime: float32 = 0.0, alpha: uint8, permanent: bool = false, targetColor: Color = White, bufferIndex: int = -1) =
+  if not grid.getOrDefault((cursorX + dirX, cursorY + dirY)).permanent:
+    grid[(cursorX, cursorY)] = Cell(ch: ch, color: col, targetColor: targetColor, lifetime: lifetime, maxLifetime: lifetime, alpha: alpha, permanent: permanent, bufferIndex: bufferIndex)
+    cursorX += dirX
+    cursorY += dirY
 
 proc warn(msg: string) =
   warningMsg = msg
@@ -129,14 +157,85 @@ proc nearestCorebase(ex, ey: int): (int, int) =
     let dist = abs(core.x - ex) + abs(core.y - ey)
     if dist < bestDist:
       bestDist = dist
-      bestX = core.x
-      bestY = core.y
+      bestX = core.x + 4
+      bestY = core.y + 2
   return (bestX, bestY)
 
+proc findNearestEnemy(tx, ty, range: int): int =
+  var bestDist = int.high
+  var bestIdx = -1
+  for i, enemy in enemies:
+    let dist = abs(enemy.x - tx) + abs(enemy.y - ty)
+    if dist < bestDist and dist <= range:
+      bestDist = dist
+      bestIdx = i
+  return bestIdx
 
+proc spawnEnemy(x, y, size: int, sound: Sound) =
+  playSound(sound)
+  enemies.add(Enemy(x: x, y: y, size: size, hp: size * size, moveTimer: 0.0, moveSpeed: 0.5, resourceDrop: size * 2))
 
-proc spawnEnemy(x, y, size: int) =
-  enemies.add(Enemy(x: x, y: y, drawX: float32(x), drawY: float32(y), size: size, hp: size * size, moveTimer: 0.0, moveSpeed: 0.5, resourceDrop: size * 2))
+proc updateParticles(dt: float32) =
+  for p in particles.mitems:
+    p.x += p.velX * dt
+    p.y += p.velY * dt
+    p.lifetime -= dt
+  particles = particles.filterIt(it.lifetime > 0)
+
+proc drawParticles(font: Font) =
+  for p in particles:
+    let sx = p.x - camX
+    let sy = p.y - camY
+    let alpha = uint8(255.0 * p.lifetime / 0.3)
+    drawText(font, $p.ch, Vector2(x: sx, y: sy), float32(FONT_SIZE), 0.0'f32, Color(r: 255, g: 100, b: 50, a: alpha))
+
+proc updateProjectiles(dt: float32) =
+  for proj in projectiles.mitems:
+    # check collision first
+    let gridX = int(proj.x / float32(CELL_W))
+    let gridY = int(proj.y / float32(CELL_H))
+    for i, enemy in enemies:
+      for (dc, dr) in cloudMask:
+        if gridX == enemy.x + dc and gridY == enemy.y + dr:
+          proj.done = true
+          enemies[i].hp -= proj.damage
+          if gridX == enemy.x + dc and gridY == enemy.y + dr:
+            proj.done = true
+            enemies[i].hp -= proj.damage
+            for p in 0..5:
+              particles.add(Particle(
+                x: proj.x, y: proj.y,
+                velX: float32(rand(-100..100)),
+                velY: float32(rand(-100..100)),
+                lifetime: 0.3,
+                ch: char(rand(33..126))
+              ))
+            break
+    if not proj.done:
+      if proj.targetIdx >= 0 and proj.targetIdx < enemies.len:
+        let enemy = enemies[proj.targetIdx]
+        let tx = float32((enemy.x + 2) * CELL_W)
+        let ty = float32((enemy.y + 2) * CELL_H)
+        let dx = tx - proj.x
+        let dy = ty - proj.y
+        let dist = sqrt(dx*dx + dy*dy)
+        if dist < 5.0:
+          proj.done = true
+          enemies[proj.targetIdx].hp -= proj.damage
+          for i in 0..5:
+            particles.add(Particle(
+              x: proj.x, y: proj.y,
+              velX: float32(rand(-100..100)),
+              velY: float32(rand(-100..100)),
+              lifetime: 0.3,
+              ch: char(rand(33..126))
+            ))
+        else:
+          proj.x += dx / dist * proj.moveSpeed * dt
+          proj.y += dy / dist * proj.moveSpeed * dt
+    else:
+      proj.done = true
+  projectiles = projectiles.filterIt(not it.done)
 
 proc updateEnemies(dt: float32) =
   for enemy in enemies.mitems:
@@ -146,10 +245,50 @@ proc updateEnemies(dt: float32) =
       let (cx, cy) = nearestCorebase(enemy.x, enemy.y)
       let dx = cx - enemy.x
       let dy = cy - enemy.y
+      let nextX = enemy.x + sgn(dx)
+      let nextY = enemy.y + sgn(dy)
+      if grid.getOrDefault((nextX, nextY)).permanent:
+        # attack the cell instead of moving
+        grid[(nextX, nextY)].ch = '\0'
+        grid[(nextX, nextY)].permanent = false
+      else:
+        enemy.x = nextX
+        enemy.y = nextY
       if abs(dx) > abs(dy):
         enemy.x += sgn(dx)
       else:
         enemy.y += sgn(dy)
+
+proc spawnProjectile(tx, ty, targetIdx: int, sound: Sound) =
+  playSound(sound)
+  let enemy = enemies[targetIdx]
+  let dx = enemy.x - tx
+  let dy = enemy.y - ty
+  let fdx = clamp(dx, -1, 1)
+  let fdy = clamp(dy, -1, 1)
+  projectiles.add(Projectile(
+    x: float32(tx * CELL_W), y: float32(ty * CELL_H),
+    targetIdx: targetIdx,
+    dirX: fdx, dirY: fdy,
+    moveTimer: 0.0, moveSpeed: 200,
+    damage: 1,
+    ch: '*'
+  ))
+
+proc drawProjectiles(font: Font) =
+  for proj in projectiles:
+    let sx = proj.x - camX
+    let sy = proj.y - camY
+    drawText(font, $proj.ch, Vector2(x: sx, y: sy), float32(FONT_SIZE), 0.0'f32, Yellow)
+
+proc updateTurrets(sound: Sound) =
+  for turret in turrets.mitems:
+    let idx = findNearestEnemy(turret.x + 3, turret.y + 1, 20)
+    if idx >= 0:
+      let enemy = enemies[idx]
+      turret.facingX = clamp(enemy.x - (turret.x + 3), -1, 1)
+      turret.facingY = clamp(enemy.y - (turret.y + 1), -1, 1)
+      spawnProjectile(turret.x + 3, turret.y + 1, idx, sound)
 
 proc drawEnemies(font: Font) =
   for enemy in enemies.mitems:
@@ -160,11 +299,6 @@ proc drawEnemies(font: Font) =
         enemy.chars[(dr * 6 + dc) mod 10] = char(rand(33..126))
       drawText(font, $enemy.chars[(dr * 6 + dc) mod 10], Vector2(x: sx, y: sy), float32(FONT_SIZE), 0.0'f32, Red)
 
-proc placeChar(ch: char, col: Color, lifetime: float32 = 0.0, alpha: uint8, permanent: bool = false, targetColor: Color = White, bufferIndex: int = -1) =
-  if not grid.getOrDefault((cursorX + dirX, cursorY + dirY)).permanent:
-    grid[(cursorX, cursorY)] = Cell(ch: ch, color: col, targetColor: targetColor, lifetime: lifetime, maxLifetime: lifetime, alpha: alpha, permanent: permanent, bufferIndex: bufferIndex)
-    cursorX += dirX
-    cursorY += dirY
 
 proc blinkRed() =
   var bx = cursorX - dirX
@@ -176,7 +310,7 @@ proc blinkRed() =
     bx -= dirX
     by -= dirY
 
-proc executeCommand(cmd: string) =
+proc executeCommand(cmd: string, sound: Sound) =
   case cmd
   of "TURRET":
     if canPlace(6, 3) and dirX == 1 and dirY == 0 and resources >= turretCost:
@@ -225,9 +359,9 @@ proc executeCommand(cmd: string) =
       cursorX += dirX * 8
       cursorY -= 4
       cores.add(Core(x: cursorX - dirX * 8, y: cursorY))
-      spawnEnemy(15, 15, wave * 3)
-      spawnEnemy(20, 15, wave * 3)
-      spawnEnemy(15, 20, wave * 3)
+      spawnEnemy(15, 15, wave * 3, sound)
+      spawnEnemy(20, 15, wave * 3, sound)
+      spawnEnemy(15, 20, wave * 3, sound)
     else:
       if resources < coreCost:
         warn("Not enough resources!")
@@ -235,26 +369,31 @@ proc executeCommand(cmd: string) =
         warn("Cannot place core base here!")
       blinkRed()
 
-proc handleInput() =
+proc handleInput(clickSound: Sound, spawnSound: Sound) =
   # direction keys
   if isKeyPressed(KeyboardKey.Right): dirX = 1;  dirY = 0
   if isKeyPressed(KeyboardKey.Left):  dirX = -1; dirY = 0
   if isKeyPressed(KeyboardKey.Down):  dirX = 0;  dirY = 1
   if isKeyPressed(KeyboardKey.Up):    dirX = 0;  dirY = -1
   if isKeyPressed(KeyboardKey.Space):
+    setSoundPitch(clickSound, rand(0.8..1.2))
+    playSound(clickSound)
     typingBuffer = ""
   if isKeyPressed(KeyboardKey.Enter):
+    playSound(clickSound)
     var matched = ""
     for cmd in COMMANDS:
       if typingBuffer.endsWith(cmd) and not grid.getOrDefault((cursorX - dirX, cursorY - dirY)).permanent:
         matched = cmd
         break
     if matched != "":
-      executeCommand(matched)
+      executeCommand(matched, spawnSound)
     else:
       if not grid.getOrDefault((cursorX - dirX, cursorY - dirY)).permanent:
         blinkRed()
   if isKeyPressed(KeyboardKey.Backspace) and not grid.getOrDefault((cursorX - dirX, cursorY - dirY)).permanent and not (grid.getOrDefault((cursorX - dirX, cursorY - dirY)).ch == '\0'):
+    setSoundPitch(clickSound, rand(0.8..1.2))
+    playSound(clickSound)
     cursorX -= dirX
     cursorY -= dirY
     grid[(cursorX, cursorY)] = Cell(ch: '\0', color: White)
@@ -264,6 +403,8 @@ proc handleInput() =
   var ch = getCharPressed()
   while ch != 0:
     if ch >= 32 and ch <= 126:
+      setSoundPitch(clickSound, rand(0.8..1.2))
+      playSound(clickSound)
       let c = char(ch)
       typingBuffer.add(c)
       if c == ' ':
@@ -296,15 +437,23 @@ proc barrelUpdate() =
 
 proc main() =
   initWindow(SCREEN_W, SCREEN_H, "SECTOR\\0")
+  initAudioDevice()
   setTargetFPS(60)
   randomize()
   var codepoints: seq[int32] = @[0x2588.int32, 0x2591.int32]
   for i in 32..126:
     codepoints.add(i.int32)
 
-  let font = loadFont("/usr/share/fonts/TTF/IosevkaTerm-Extended.ttf", FONT_SIZE, codepoints)
+  let clickWave = loadWaveFromMemory(".wav", clickData.toOpenArrayByte(0, clickData.len-1))
+  let clickSound = loadSoundFromWave(clickWave)
+  let shootWave = loadWaveFromMemory(".wav", shootData.toOpenArrayByte(0, shootData.len-1))
+  let shootSound = loadSoundFromWave(shootWave)
+  let spawnWave = loadWaveFromMemory(".wav", spawnData.toOpenArrayByte(0, spawnData.len-1))
+  let spawnSound = loadSoundFromWave(spawnWave)
+
+  let font = loadFontFromMemory(".ttf", fontData.toOpenArrayByte(0, fontData.len-1), FONT_SIZE, codepoints)
   setTextureFilter(font.texture, TextureFilter.Bilinear)
-  let fontBold = loadFont("/usr/share/fonts/TTF/IosevkaTerm-ExtendedBold.ttf", FONT_SIZE, codepoints)
+  let fontBold = loadFontFromMemory(".ttf", fontBoldData.toOpenArrayByte(0, fontBoldData.len-1), FONT_SIZE, codepoints)
   setTextureFilter(fontBold.texture, TextureFilter.Bilinear)
 
   while not windowShouldClose():
@@ -313,7 +462,9 @@ proc main() =
     # tick
     tickTimer += dt
     if tickTimer >= 1.0:
+      updateTurrets(shootSound)
       tickTimer = 0.0
+
 
     blinkTimer += dt
     if blinkTimer >= 0.5:
@@ -321,8 +472,15 @@ proc main() =
       blinkTimer = 0.0
 
     updateEnemies(dt)
+    updateProjectiles(dt)
+    updateParticles(dt)
+
+    projectiles = projectiles.filterIt(it.targetIdx < enemies.len)
+    enemies = enemies.filterIt(it.hp > 0)
+
     # input
-    handleInput()
+    handleInput(clickSound, spawnSound)
+
 
     # camera lerp toward cursor
     let targetX = float32(cursorX * CELL_W) - SCREEN_W / 2
@@ -359,6 +517,9 @@ proc main() =
     if typingBuffer.allIt(it == ' '):
       typingBuffer = ""
     drawEnemies(font)
+    drawProjectiles(font)
+    drawParticles(font)
+
     # draw cursor
     let cx = float32(cursorX * CELL_W) - camX
     let cy = float32(cursorY * CELL_H) - camY
